@@ -1,5 +1,6 @@
-const { createConnection } = require('./../utils/connection.js');
 const puppeteer = require('puppeteer');
+const { validateCaptcha } = require('./../utils/validateCaptcha');
+const { createConnection } = require('./../utils/connection.js');
 const { requestInterception } = require('./../utils/requestInterception.js');
 
 const createBrowser = async (slowMo = 0, headless = true, devtools = false) => {
@@ -9,72 +10,95 @@ const createBrowser = async (slowMo = 0, headless = true, devtools = false) => {
   return browser;
 };
 
-const run = async () => {  
+const run = async (baseUrl, urlJumpScale, range = 0) => {
+  let dynamicUrl = baseUrl;
   const conn = await createConnection();
-  const browser = await createBrowser(200, false);
-  const animeUrls = await getUrls(browser);
-  await uploadCharacterData(animeUrls, browser, conn);
+  const browser = await createBrowser(100, false);
+  const page = await browser.newPage();
+  await page.setDefaultNavigationTimeout(0);
+
+  while(range != 9400) {
+    const limitRange = dynamicUrl.split('limit=')[1];
+    console.log('getting data from list', dynamicUrl);
+    const animeUrls = await getUrls(page, dynamicUrl);
+    await uploadCharacterData(animeUrls, page, conn);
+    dynamicUrl = dynamicUrl.replace(`limit=${limitRange}`, `limit=${Number.parseInt(limitRange) + urlJumpScale}`);
+    range = range + urlJumpScale;
+  }
 };
 
-const getUrls = async (browser) => {
-  const page = await browser.newPage();
-  const baseUrl = 'https://myanimelist.net/topanime.php?limit=0';
-  const shouldIgnore = ['script', 'stylesheet', 'font', 'media', 'image'];
-  await requestInterception(page, shouldIgnore);
-  await page.goto(baseUrl);
+const getUrls = async (page, pageList) => {
+  await page.goto(pageList);
 
-  return page.evaluate(() => {
+  try {
+    const delay = await validateCaptcha(page);
+    await page.waitFor(delay);
+  } catch (error) {
+    await page.goto(pageList);
+  }
+
+  return await page.evaluate(() => {
     return Array.from(document.querySelectorAll('.hoverinfo_trigger.fl-l.ml12.mr8')).map(a => a.href);
   });
 };
 
-const uploadCharacterData = async (animeList, browser, conn) => {
-  const page = await browser.newPage();
+const uploadCharacterData = async (animeList, page, conn) => {
   const dbAnime = conn.db('anime');
 
   for(let i = 0; i < animeList.length; i++) {
     console.log('fetching characters data from...', animeList[i]);
-    await page.goto(`${animeList[i]}/characters`);
+    await page.goto(`${animeList[i]}/characters`, {waitUntil: 'networkidle0'});
 
     try {
-      console.log('Searching captcha submit');
-      await page.waitForSelector('.g-recaptcha' , { timeout: 500 });
-      await page.click('.g-recaptcha');
-      await page.waitForNavigation();
-    } catch {}
+      const delay = await validateCaptcha(page);
+      await page.waitFor(delay);
+    } catch (error) {
+      await page.goto(`${animeList[i]}/characters`, {waitUntil: 'networkidle0'});
+    }
 
     const characterInfo = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('.borderClass.bgColor2 > .spaceit_pad > a'))
-        .map(a => ({ name: a.textContent, url: `${a.href}/pictures` }));
+      const characterSelector = '.js-anime-character-table .borderClass > div.spaceit_pad > a';
+      return Array.from(document.querySelectorAll(characterSelector))
+        .map(a => ({ name: a.textContent.replace(',', ''), url: `${a.href}/pictures` }));
     });
+    
+    console.log(`fetching ${characterInfo.length} characters`);
 
     for(let j = 0; j < characterInfo.length; j++) {
-      await page.goto(characterInfo[j].url);
+      await page.goto(characterInfo[j].url, {waitUntil: 'networkidle0'});
 
       try {
-        console.log('Searching captcha submit');
-        await page.waitForSelector('.g-recaptcha' , { timeout: 500 });
-        await page.click('.g-recaptcha');
-        await page.waitForNavigation();
-      } catch  {}
+        const delay = await validateCaptcha(page);
+        await page.waitFor(delay);
+        await page.waitForFunction('document.querySelector("td.borderClass > a").textContent');
+      } catch (error) {
+        await page.goto(characterInfo[j].url, {waitUntil: 'networkidle0'});
+      }
 
-
-      console.log('Im here after captcha click');
-      const images = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('.js-picture-gallery')).map(a => a.href);
+      const { images, animeName, characterId } = await page.evaluate(() => {
+        const animeName = document.querySelector('td.borderClass > a').textContent;
+        const images = Array.from(document.querySelectorAll('.js-picture-gallery')).map(a => a.href);
+        const characterId = window.location.href.split('/')[4];
+        return { images, animeName, characterId };
       });
 
-      characterInfo[j].images = images;
-      const isDuplicated = await dbAnime.collection('characters').findOne({name: characterInfo[j].name});
+      const data = {
+        ...characterInfo[j],
+        images,
+        anime: animeName,
+        characterId: Number.parseInt(characterId)
+      };
+
+      const isDuplicated = await dbAnime.collection('characters').findOne({characterId: data.characterId});
       
-      !isDuplicated ? (
-        dbAnime.collection('characters').insertOne(characterInfo[j])
-       ) : 
-        console.log('isDuplicated', true);
+      if(!isDuplicated) {
+        dbAnime.collection('characters').insertOne(data)
+        console.log(`${data.name} inserted`);
+      } else {
+        console.log(`==> skipping duplicated:: ${data.name} <==`);
+      }
     }
   }
-
-  dbAnime.close();
 };
 
 
