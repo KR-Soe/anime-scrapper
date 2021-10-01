@@ -7,9 +7,10 @@ const validateCaptcha = async page => {
     console.log('clicked..')
     await page.waitForNavigation();
     console.log('waiting...')
-    return 5000;
+    return new Promise((resolve) => {
+      setTimeout(resolve, 5000)
+    });
   } catch {
-    return 0;
   }
 };
 
