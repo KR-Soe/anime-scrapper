@@ -19,7 +19,7 @@ const run = async (baseUrl, urlJumpScale, range = 0) => {
 
   while(range != 9400) {
     const limitRange = dynamicUrl.split('limit=')[1];
-    console.log('getting data from list', dynamicUrl);
+    console.log('FETCHING PAGE NUMER ====>>>', dynamicUrl);
     const animeUrls = await getUrls(page, dynamicUrl);
     await uploadCharacterData(animeUrls, page, conn);
     dynamicUrl = dynamicUrl.replace(`limit=${limitRange}`, `limit=${Number.parseInt(limitRange) + urlJumpScale}`);
@@ -31,10 +31,9 @@ const getUrls = async (page, pageList) => {
   await page.goto(pageList);
 
   try {
-    const delay = await validateCaptcha(page);
-    await page.waitFor(delay);
+    await validateCaptcha(page);
   } catch (error) {
-    await page.goto(pageList);
+    await page.reload(pageList);
   }
 
   return await page.evaluate(() => {
@@ -47,32 +46,37 @@ const uploadCharacterData = async (animeList, page, conn) => {
 
   for(let i = 0; i < animeList.length; i++) {
     console.log('fetching characters data from...', animeList[i]);
-    await page.goto(`${animeList[i]}/characters`, {waitUntil: 'networkidle0'});
+    await page.goto(`${animeList[i]}/characters`, { waitUntil: ['networkidle0', 'domcontentloaded', 'load'] });
 
     try {
-      const delay = await validateCaptcha(page);
-      await page.waitFor(delay);
+      await validateCaptcha(page);
     } catch (error) {
-      await page.goto(`${animeList[i]}/characters`, {waitUntil: 'networkidle0'});
+      await page.reload(`${animeList[i]}/characters`, { waitUntil: ['networkidle0', 'domcontentloaded', 'load'] });
     }
 
     const characterInfo = await page.evaluate(() => {
-      const characterSelector = '.js-anime-character-table .borderClass > div.spaceit_pad > a';
-      return Array.from(document.querySelectorAll(characterSelector))
-        .map(a => ({ name: a.textContent.replace(',', ''), url: `${a.href}/pictures` }));
+      const animeGenreSelector = Array.from(document.querySelectorAll('span[itemprop="genre"]')).map(data => data.textContent);
+      const animePortraitSelector = document.querySelector('tr > .borderClass img') || false;
+      return Array.from(document.querySelectorAll('.js-anime-character-table .borderClass > div.spaceit_pad > a'))
+        .map(a => ({ 
+            name: a.textContent.replace(',', ''),
+            url: `${a.href}/pictures`,
+            genres: animeGenreSelector ,
+            animeImage: animePortraitSelector ? animePortraitSelector.src : 'Not Founded'
+          })
+        );
     });
     
-    console.log(`fetching ${characterInfo.length} characters`);
+    console.log(`${characterInfo.length} CHARACTERS DETECTED`);
 
     for(let j = 0; j < characterInfo.length; j++) {
-      await page.goto(characterInfo[j].url, {waitUntil: 'networkidle0'});
+      await page.goto(characterInfo[j].url, { waitUntil: ['networkidle0', 'domcontentloaded', 'load'] });
 
       try {
-        const delay = await validateCaptcha(page);
-        await page.waitFor(delay);
+        await validateCaptcha(page);
         await page.waitForFunction('document.querySelector("td.borderClass > a").textContent');
       } catch (error) {
-        await page.goto(characterInfo[j].url, {waitUntil: 'networkidle0'});
+        await page.reload(characterInfo[j].url, { waitUntil: ['networkidle0', 'domcontentloaded', 'load'] });
       }
 
       const { images, animeName, characterId } = await page.evaluate(() => {
@@ -85,17 +89,17 @@ const uploadCharacterData = async (animeList, page, conn) => {
       const data = {
         ...characterInfo[j],
         images,
-        anime: animeName,
+        animeName,
         characterId: Number.parseInt(characterId)
       };
 
-      const isDuplicated = await dbAnime.collection('characters').findOne({characterId: data.characterId});
+      const isDuplicated = await dbAnime.collection('characters').findOne({ characterId: data.characterId, name: data.name });
       
-      if(!isDuplicated) {
+      if(!isDuplicated && data.images.length > 0) {
         dbAnime.collection('characters').insertOne(data)
         console.log(`${data.name} inserted`);
       } else {
-        console.log(`==> skipping duplicated:: ${data.name} <==`);
+        console.log(`skipping duplicated:: ${data.name}`);
       }
     }
   }
