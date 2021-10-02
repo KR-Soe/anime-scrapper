@@ -14,7 +14,7 @@ const createBrowser = async (slowMo = 0, headless = true, devtools = false) => {
 const run = async (baseUrl, urlJumpScale, range = 0) => {
   let dynamicUrl = baseUrl;
   const conn = await createConnection();
-  const browser = await createBrowser(0, true);
+  const browser = await createBrowser(0, false);
 
   while(range != 9400) {
     const limitRange = dynamicUrl.split('limit=')[1];
